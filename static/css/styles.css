@@ -1,11 +1,11 @@
 @font-face {
     font-family: Alphacentauri;
-    src: url("../assets/fonts/Alphacentauri.ttf");
+    src: url("../fonts/Alphacentauri.ttf");
   }
   
   @font-face {
     font-family: Montserrat;
-    src: url("../assets/fonts/Montserrat.ttf");
+    src: url("../fonts/Montserrat.ttf");
   }
   
   html {

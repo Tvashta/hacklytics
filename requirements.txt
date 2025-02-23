@@ -1,0 +1,3 @@
+groq
+geopy
+flask_cors

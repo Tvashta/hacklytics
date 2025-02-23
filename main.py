@@ -1,46 +1,69 @@
 import os
 import re
 import json
-from flask import Flask, request, jsonify
+import requests
+from flask import Flask, request, jsonify, render_template
 from flask_cors import CORS
-from groq import Groq
 from geopy.geocoders import Nominatim
 from io import BytesIO
 from datetime import datetime
+import base64
+from groq import Groq
 
 # Initialize Flask app
 app = Flask(__name__)
 CORS(app)
 
+@app.route('/')
+def home():
+    return render_template('index.html')
 
+@app.route('/roadmap')
+def roadmap():
+    return render_template('roadmap.html')
+
+@app.route('/milestones')
+def milestones():
+    return render_template('milestones.html')
+
+
+# Cloudflare AI configuration (replace these placeholders with your actual details)
+CLOUDFLARE_ACCOUNT_ID = '3132b6001d2da3390c463648de7e3b80'
+CLOUDFLARE_API_TOKEN = 'JHJFOUxR0RyIyJ0KiZrPh4KAm47oMEBg0rr_AzkT'
+# Endpoints for Chat and Whisper models (adjust endpoint paths if needed)
+
+CLOUDFLARE_CHAT_MODEL_URL = f"https://api.cloudflare.com/client/v4/accounts/{CLOUDFLARE_ACCOUNT_ID}/ai/run/@cf/meta/llama-3-8b-instruct"
+
+CLOUDFLARE_WHISPER_MODEL_URL = f"https://api.cloudflare.com/client/v4/accounts/{CLOUDFLARE_ACCOUNT_ID}/ai/run/@cf/openai/whisper-large-v3-turbo"
 GROQ_API_KEY =  "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"
 
 client = Groq(api_key=GROQ_API_KEY)
 
 # Constants
 MODEL_NAME = "llama-3.3-70b-versatile"
-WHISPER_MODEL = "whisper-large-v3-turbo"
 
+HEADERS = {
+    "Authorization": f"Bearer {CLOUDFLARE_API_TOKEN}",
+    "Content-Type": "application/json"
+}
+
+# Constants
+MODEL_NAME = "llama-3.3-70b-versatile"
+WHISPER_MODEL = "whisper-large-v3-turbo"  # For reference
 
 def get_coordinates(location_name):
-    """
-    Get latitude and longitude for a given location name using the Nominatim geocoder.
-    """
+    """Get latitude and longitude for a given location name using Nominatim."""
     geolocator = Nominatim(user_agent="location_finder")
     location = geolocator.geocode(location_name)
     if location:
         return {"latitude": location.latitude, "longitude": location.longitude}
     return None
 
-
 def extract_date_time_location(response_text):
-    """
-    Extract Date, Time, and Location from the Groq response text using regex.
-    """
+    """Extract Date, Time, and Location from the response text using regex."""
     date_match = re.search(r"Date:\s*(.*)", response_text)
     time_match = re.search(r"Time:\s*(.*)", response_text)
     location_match = re.search(r"Location:\s*(.*)", response_text)
-
     return {
         "Date": date_match.group(1) if date_match else None,
         "Time": time_match.group(1) if time_match else None,
@@ -49,76 +72,69 @@ def extract_date_time_location(response_text):
 
 
 def transcribe_audio_file(audio_data):
-    """
-    Transcribe audio file content using the Whisper model.
-    """
-    audio_buffer = BytesIO(audio_data)
-    file = ("audio.m4a", audio_buffer)
-
+    """Transcribe audio file content using Cloudflare's Whisper model by sending a JSON payload with a base64-encoded audio."""
+    encoded_audio = base64.b64encode(audio_data).decode('utf-8')
+    payload = {
+        "audio": encoded_audio,
+    }
     try:
-        transcription = client.audio.transcriptions.create(
-            file=file,
-            model=WHISPER_MODEL,
-            prompt="Specify context or spelling",
-            response_format="json",
-            language="en",
-            temperature=0.0
+        response = requests.post(
+            CLOUDFLARE_WHISPER_MODEL_URL,
+            headers=HEADERS,  # Ensure headers include "Content-Type": "application/json"
+            json=payload
         )
-        return transcription.text
+        response.raise_for_status()
+        data = response.json()
+        print(data)
+        # Adjust the key names based on Cloudflare's API response structure.
+        return data["result"]["text"]
     except Exception as e:
         return str(e)
 
 
 def extract_info_from_sentence(sentence):
     """
-    Extract date, time, and location from the sentence using Groq.
+    Extract date, time, and location from the sentence using Cloudflare's chat AI.
     """
+    payload = {
+        "messages": [
+            {"role": "user", "content": f"{sentence}. Give me the date time [Proper readable format dd:mm:yy hh:mm], location only like Date: , Time: , Location: "}
+        ],
+        "temperature": 0.1,
+        "max_tokens": 160,
+        "top_p": 0.95
+    }
     try:
-        completion = client.chat.completions.create(
-            model=MODEL_NAME,
-            messages=[{"role": "user", "content": f"{sentence}. Give me the date time, location only like Date: , Time: , Location: "}],
-            temperature=0.1,
-            max_completion_tokens=160,
-            top_p=0.95,
-            stream=True
-        )
-
-        response_text = ""
-        for chunk in completion:
-            response_text += chunk.choices[0].delta.content or ""
-
+        response = requests.post(CLOUDFLARE_CHAT_MODEL_URL, headers=HEADERS, json=payload)
+        response.raise_for_status()
+        data = response.json()
+        print(data)
+        # Assuming the API returns a structure similar to:
+        # { "result": { "choices": [ { "message": { "content": "Your response text" } } ] } }
+        response_text = data["result"]['response']
         return extract_date_time_location(response_text)
     except Exception as e:
         return {"error": f"Failed to extract information: {str(e)}"}
 
-
 @app.route('/extract_info_and_coordinates', methods=['POST'])
-def extract_info_and_coordinates():
+def extract_info_and_coordinates_route():
     """
     Extracts date, time, location from the sentence and returns coordinates for the location.
     """
     data = request.get_json()
     sentence = data.get('sentence')
-
     if not sentence:
         return jsonify({'error': 'Sentence is required'}), 400
 
-    # Extract date, time, and location
     structured_data = extract_info_from_sentence(sentence)
-
     location_name = structured_data.get("Location")
     if location_name:
-        # Get coordinates for the location
         coordinates = get_coordinates(location_name)
-        if coordinates:
-            structured_data["Coordinates"] = coordinates
-        else:
-            structured_data["Coordinates"] = {"error": "Location not found"}
+        structured_data["Coordinates"] = coordinates if coordinates else {"error": "Location not found"}
     else:
         structured_data["Coordinates"] = {"error": "No location found in sentence"}
 
     return jsonify(structured_data), 200
-
 
 @app.route("/transcribe", methods=["POST"])
 def transcribe_audio():
@@ -130,75 +146,59 @@ def transcribe_audio():
 
     audio_file = request.files["audio"]
     audio_data = audio_file.read()
-
     transcription_text = transcribe_audio_file(audio_data)
-
     return jsonify({"transcription": transcription_text})
-
 
 @app.route('/subtask', methods=['POST'])
 def subtask():
-        data = request.json  # Get JSON data from the request
-        task = data.get("task")  # Extract location from request
-        print(task)
-        
-        # if not sentence:
-        #     return jsonify({'error': 'Sentence is required'}), 400
-        #sentence = "I have to complete a run at Columbia  tomorow morniing at five . Give me the date time, location only like Date: , Time: , Location: and the last word should be complete!"
-        completion = client.chat.completions.create(
-            model="llama-3.3-70b-versatile",
-            messages=[
-                {
-                   "role": "user",
-    "content": f"""Here are some examples of tasks and their subtasks:
-
-    Example 1:
-    Task: "I need to go to the gym in the evening."
-    Subtask: "Do you want to prepare your gym bag?"
-
-    Example 2:
-    Task: "I need to finish my homework."
-    Subtask: "Do you want to open your laptop?"
-
-    Example 3:
-    Task: "I need to go for a run in the morning"
-    Subtask: "Do you want to wear your running shoes?"
-
-    Example 4:
-    Task: "So you wnt ot go somewhere"
-    Subtask: "Do you wanna go out?"
-    Example 5:
-    Task: "I nned to go to Columbia University in the evening"
-    Subtask: "Do you wanna leave the house""
-    
-
-    Now, for this task: {task} Just state a subtask with no other words but like a polite question, do you want to ... ?. 
     """
-                }
-            ],
-            temperature=0.7,
-            max_completion_tokens=160
-            ,
-            top_p=0.95,
-            stream=True,
-            
-        )
-        subtask = ""
-        for chunk in completion:
-            subtask += chunk.choices[0].delta.content or ""
-        print(subtask)
-        # Return the response as JSON
-        return jsonify({
-            "task": task,
-            "subtask": subtask.strip()
-        })
-      
+    Returns a subtask based on the input task using Cloudflare's chat AI.
+    """
+    data = request.json
+    task_input = data.get("task")
+    if not task_input:
+        return jsonify({"error": "Task is required"}), 400
 
-       
+    prompt = f"""Here are some examples of tasks and their subtasks:
 
-        return jsonify(json_output), 200
+Example 1:
+Task: "I need to go to the gym in the evening."
+Subtask: "Do you want to prepare your gym bag?"
 
-#priority algorithm
+Example 2:
+Task: "I need to finish my homework."
+Subtask: "Do you want to open your laptop?"
+
+Example 3:
+Task: "I need to go for a run in the morning"
+Subtask: "Do you want to wear your running shoes?"
+
+Example 4:
+Task: "So you want to go somewhere"
+Subtask: "Do you wanna go out?"
+
+Example 5:
+Task: "I need to go to Columbia University in the evening"
+Subtask: "Do you wanna leave the house?"
+
+Now, for this task: {task_input} Just state a subtask with no other words but like a polite question, do you want to ... ?"""
+
+    payload = {
+        "messages": [{"role": "user", "content": prompt}],
+        "temperature": 0.7,
+        "max_tokens": 160,
+        "top_p": 0.95
+    }
+    try:
+        response = requests.post(CLOUDFLARE_CHAT_MODEL_URL, headers=HEADERS, json=payload)
+        response.raise_for_status()
+        data_resp = response.json()
+        print(data_resp)
+        subtask_text = data_resp["result"]["response"]
+        return jsonify({"task": task_input, "subtask": subtask_text})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
 @app.route('/algo', methods=['POST'])
 def algo():
   #Case1
@@ -250,7 +250,6 @@ def algo():
             "end_time": end_time
         })
     return jsonify(tasks)
-
 
 if __name__ == '__main__':
     # Run the Flask app on port 5001
